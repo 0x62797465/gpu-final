@@ -1,0 +1,51 @@
+`include "params.svh"
+module gpu (
+    input            CLOCK_50_B5B,
+    input            CPU_RESET_n,
+    
+    input            UART_RX,
+    output           UART_TX,
+    
+    output    [7:0]  LEDG,
+    output    [9:0]  LEDR,
+
+    output    [9:0]  DDR2LP_CA,
+    output    [1:0]  DDR2LP_CKE,
+    output           DDR2LP_CK_n, ///DIFFERENTIAL 1.2-V HSUL
+    output           DDR2LP_CK_p, ///DIFFERENTIAL 1.2-V HSUL
+    output    [1:0]  DDR2LP_CS_n,
+    output    [3:0]  DDR2LP_DM,
+    inout     [31:0] DDR2LP_DQ,
+    inout     [3:0]  DDR2LP_DQS_n, ///DIFFERENTIAL 1.2-V HSUL
+    inout     [3:0]  DDR2LP_DQS_p, ///DIFFERENTIAL 1.2-V HSUL
+    input            DDR2LP_OCT_RZQ
+);
+
+wire CLK;
+assign CLK = CLOCK_50_B5B;
+
+mem_controller mem_controller (
+    .DDR2LP_CA(DDR2LP_CA),
+    .DDR2LP_CKE(DDR2LP_CKE),
+    .DDR2LP_CK_n(DDR2LP_CK_n),
+    .DDR2LP_CK_p(DDR2LP_CK_p),
+    .DDR2LP_CS_n(DDR2LP_CS_n),
+    .DDR2LP_DM(DDR2LP_DM),
+    .DDR2LP_DQ(DDR2LP_DQ),
+    .DDR2LP_DQS_n(DDR2LP_DQS_n),
+    .DDR2LP_DQS_p(DDR2LP_DQS_p),
+    .DDR2LP_OCT_RZQ(DDR2LP_OCT_RZQ),
+
+    .CPU_RESET_n(CPU_RESET_n),
+    .CLK(CLK),
+    .debug_out({LEDG, LEDR})
+);
+/*
+genvar i;
+generate
+    for (i = 0; i++; i < STREAMING_MANAGERS) begin
+        sm sm (CLK, CPU_RESET_n, STREAM)
+    end
+endgenerate
+*/
+endmodule

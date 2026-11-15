@@ -57,7 +57,7 @@ module fpga_lpddr2_example (
 	wire         rst_controller_003_reset_out_reset;             // rst_controller_003:reset_out -> d0:reset_n
 	wire         rst_controller_004_reset_out_reset;             // rst_controller_004:reset_out -> [mm_interconnect_0:d0_avl_reset_reset_bridge_in_reset_reset, mm_interconnect_0:d0_avl_translator_reset_reset_bridge_in_reset_reset]
 
-	fpga_lpddr2_example_if0 if0 (
+	mem_controller if0 (
 		.pll_ref_clk                (pll_ref_clk),                                    //        pll_ref_clk.clk
 		.global_reset_n             (global_reset_n),                                 //       global_reset.reset_n
 		.soft_reset_n               (soft_reset_n),                                   //         soft_reset.reset_n
