@@ -1,11 +1,14 @@
 `include "types.svh"
-// Remove & update later!
+// The clocks are synchronous (DDR controller is 2x faster, but is derived from CLK)
+// so we are able to do some things that a traditional setup would not permit.
+// Regardless, this needs to be tested.
 // Just a FIFO queue; different warps are not likely to try and access the same
 // addresses due to synchronization issues and same-warp accesses are optimized
-// locally. 
+// at the SMSP level. 
 // External has 2 m10k blocks allowing for full bandwidth utilization,
 // and will keep track of reads/false writes. This unit outputs what
-// commands were executed and the read data along with a stall signal. 
+// commands were executed (besides true writes) and the read data 
+// along with a stall signal. 
 // The external module must always be able to drain reads at least as
 // fast as we output them. 
 module mem_sched (
@@ -35,33 +38,27 @@ module mem_sched (
 
 );
 
-logic pll_ref_clk;
 logic local_init_done;
 logic local_cal_success;
 logic local_cal_fail;
-logic drv_status_pass;
-logic drv_status_fail;
-logic drv_status_test_complete;
 
 logic afi_clk;
 logic afi_half_clk;
-logic clk_lpddr2;
 
-logic          test_software_reset_n;
-logic          test_global_reset_n;
-logic          test_start_n;
-logic          avl_ready;              //        avl.waitrequest_n
-logic          avl_burstbegin;         //         .beginbursttransfer
-logic [26:0]   avl_addr;               //         .address
-logic          avl_rdata_valid;        //         .readdatavalid
-logic [31:0]   avl_rdata;              //         .readdata
-logic [31:0]   avl_wdata;              //         .writedata
-logic          avl_read_req;           //         .read
-logic [31:0]   avl_be;
-logic          avl_write_req;          //         .write
-logic [4:0]    avl_size;               //         .burstcount
+struct {
+    logic          ready;       
+    logic          burstbegin;  
+    logic [26:0]   addr;        
+    logic          rdata_valid; 
+    logic [31:0]   rdata;       
+    logic [31:0]   wdata;       
+    logic          read_req;    
+    logic [31:0]   be;          
+    logic          write_req;   
+    logic [4:0]    burstcount;
+} avl;
 
-assign avl_be = 4'hF;
+assign avl.be = '1;
 
 assign debug_out = {CLK, local_init_done,
     local_cal_success, local_cal_fail};
@@ -81,16 +78,16 @@ mem_controller mem_controller (
     .mem_dqs(DDR2LP_DQS_p),
     .mem_dqs_n(DDR2LP_DQS_n),
 
-    .avl_ready_0(avl_ready),
-    .avl_burstbegin_0(avl_burstbegin),
-    .avl_addr_0(avl_addr),
-    .avl_rdata_valid_0(avl_rdata_valid),
-    .avl_rdata_0(avl_rdata),
-    .avl_wdata_0(avl_wdata),
-    .avl_be_0(avl_be),
-    .avl_read_req_0(avl_read_req),
-    .avl_write_req_0(avl_write_req),
-    .avl_size_0(avl_size),
+    .avl_ready_0(avl.ready),
+    .avl_burstbegin_0(avl.burstbegin),
+    .avl_addr_0(avl.addr),
+    .avl_rdata_valid_0(avl.rdata_valid),
+    .avl_rdata_0(avl.rdata),
+    .avl_wdata_0(avl.wdata),
+    .avl_be_0(avl.be),
+    .avl_read_req_0(avl.read_req),
+    .avl_write_req_0(avl.write_req),
+    .avl_size_0(avl.burstcount),
 
     .afi_clk(afi_clk),
     .afi_half_clk(afi_half_clk),
@@ -194,7 +191,7 @@ always @(posedge CLK or negedge CPU_RESET_n) begin
             end else begin
                 // the pseudo tail MUST consume at least two entries
                 // when starting a new command, so this works
-                if (memq.dat_at_tail == 2'b10) begin // fake write
+                if (memq.dat_at_tail[1:0] == 2'b10) begin // fake write
                     in_fw <= 1;
                     in_op <= 1;
                     in_hd <= 1;
@@ -202,11 +199,11 @@ always @(posedge CLK or negedge CPU_RESET_n) begin
                     QUEUE_OUT_VALID <= 1;
                     QUEUE_OUT <= memq.dat_at_tail;
                 end
-                if (memq.dat_at_tail == 2'b01) begin // write
+                if (memq.dat_at_tail[1:0] == 2'b01) begin // write
                     in_op <= 1;
                     entries_left <= 8;
                 end
-                if (memq.dat_at_tail == 2'b00) begin // read
+                if (memq.dat_at_tail[1:0] == 2'b00) begin // read
                     in_hd <= 1;
                     QUEUE_OUT_VALID <= 1;
                     QUEUE_OUT <= memq.dat_at_tail;
@@ -226,19 +223,26 @@ logic [$clog2(9)-1:0] state;
 
 logic rbuff_ptr;
 
+logic [$clog2(7)-1:0] wleft; // writes left
+
 always @(posedge afi_half_clk) begin
-    if (!test_software_reset_n) begin
-        state <= '0;
-        avl_addr <= '0; // 26:0
-        avl_wdata <= '0;
-        avl_write_req <= '0;
-        avl_burstbegin <= '0;
-        avl_read_req <= '0;
+    if (!CPU_RESET_n) begin
+        state <= initializing;
+        avl.addr <= '0; // 26:0
+        avl.wdata <= '0;
+        avl.write_req <= '0;
+        avl.burstbegin <= '0;
+        avl.read_req <= '0;
+        avl.burstcount <= 8; 
+
+        memq.pseudo_tail <= 0;
+
         rbuff_ptr <= 0;
+
         READ_OUT_VALID <= '0;
     end else begin
-        if (avl_rdata_valid && local_init_done && local_cal_success) begin
-            READ_OUT[rbuff_ptr] <= avl_rdata;
+        if (avl.rdata_valid && local_init_done && local_cal_success) begin
+            READ_OUT[rbuff_ptr] <= avl.rdata;
             READ_OUT_VALID[rbuff_ptr] <= !READ_OUT_VALID[rbuff_ptr];
             rbuff_ptr <= !rbuff_ptr;
         end
@@ -248,32 +252,47 @@ always @(posedge afi_half_clk) begin
                     state <= idle;
             end
             idle : begin
-                if (avl_ready) begin
+                if (avl.ready) begin
                     if (!memq.data[memq.pseudo_tail][0] && 
                             (memq.left < FIFO_MEMCMD_BUFF_SIZE-1 || memq.full)) begin
-                        avl_burstbegin <= 1;
-                        avl_read_req <= 1;
-                        avl_addr = memq.data[memq.pseudo_tail+1]; 
+                        avl.burstbegin <= 1;
+                        avl.read_req <= 1;
+                        avl.addr <= memq.data[memq.pseudo_tail+1]; 
                         memq.pseudo_tail <= memq.pseudo_tail + 2;
                     end else if (memq.left < FIFO_MEMCMD_BUFF_SIZE-2 || memq.full) begin
-                        avl_addr <= memq.data[memq.pseudo_tail+1];
-                        avl_wdata <= memq.data[memq.pseudo_tail+2];
-                        memq.pseudo_tail <= memq.pseudo_tail + 4;
+                        avl.addr <= memq.data[memq.pseudo_tail+1];
+                        avl.wdata <= memq.data[memq.pseudo_tail+2];
+                        avl.burstbegin <= 1;
+                        avl.write_req <= 1;
+                        memq.pseudo_tail <= memq.pseudo_tail + 3;
+                        wleft <= 7;
                         state <= write_start;
                     end else begin
-                        avl_burstbegin <= 0;
-                        avl_read_req <= 0;
+                        avl.burstbegin <= 0;
+                        avl.read_req <= 0;
+                        avl.write_req <= 0;
                     end
                 end
             end
             write_start : begin
-                if (avl_ready) begin
-                    
-                    avl_write_req <= 0;
-                    avl_burstbegin <= 0;
-                    state <= 3;
+                if (avl.ready) begin
+                    avl.burstbegin <= 0;
+                    if (memq.pseudo_tail != memq.head) begin
+                        wleft <= wleft - 1;
+                        memq.pseudo_tail <= memq.pseudo_tail + 1;
+                        avl.wdata <= memq.data[memq.pseudo_tail];
+                        if (wleft)
+                            avl.write_req <= 1;
+                        else begin // extra consumption of bytemask
+                            avl.write_req <= 0;
+                            state <= idle;
+                        end
+                    end else begin
+                        avl.write_req <= 0;
+                    end
                 end
             end
+            default : state <= initializing;
         endcase
     end
 end
