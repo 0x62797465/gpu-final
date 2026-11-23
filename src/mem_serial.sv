@@ -28,7 +28,6 @@ logic local_init_done;
 logic local_cal_success;
 logic local_cal_fail;
 
-logic afi_clk;
 logic afi_half_clk;
 
 struct {
@@ -39,7 +38,7 @@ struct {
     logic [31:0]   rdata;       
     logic [31:0]   wdata;       
     logic          read_req;    
-    logic [31:0]   be;          
+    logic [3:0]    be;          
     logic          write_req;   
     logic [4:0]    burstcount;
 } avl;
@@ -75,7 +74,7 @@ mem_controller mem_controller (
     .avl_write_req_0(avl.write_req),
     .avl_size_0(avl.burstcount),
 
-    .afi_clk(afi_clk),
+    .afi_clk(),
     .afi_half_clk(afi_half_clk),
     .afi_reset_n(),
     .afi_reset_export_n(),
@@ -107,7 +106,7 @@ logic [$clog2(6)-1:0] wleft; // writes left
 
 logic [MEMCMD_IN_W-1:0] cmd_in_valid_local;
 
-logic [$clog2(MEMCMD_IN_W)-1:0] in_ptr;
+logic [$clog2(MEMCMD_IN_W-1)-1:0] in_ptr; // zero indexed
 logic [2:0] rbuff_ptr;
 
 always @(posedge afi_half_clk) begin
@@ -212,8 +211,6 @@ always @(posedge afi_half_clk) begin
                         avl.write_req <= 1;
 
                         wleft <= wleft - 1;
-                        memq.pseudo_tail <= memq.pseudo_tail + 1;
-                        avl.wdata <= memq.data[memq.pseudo_tail];
                         if (wleft)
                             avl.write_req <= 1;
                         else begin

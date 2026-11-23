@@ -1,3 +1,0 @@
-module mem_serial_tb;
-    always #10
-endmodule
