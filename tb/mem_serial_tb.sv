@@ -6,7 +6,7 @@
 // to testing normal corectness.
 
 module mem_serial_tb;
-    localparam int ITERATIONS = 10; // iterations per modulos
+    localparam int ITERATIONS = 100; // iterations per modulos
 
     // DUT wires
     logic [MEMCMD_IN_W-1:0] [31:0] CMD_IN;
@@ -74,6 +74,7 @@ module mem_serial_tb;
 
         logic [$clog2(LINES_FIFO-1)-1:0] head;
         logic [$clog2(LINES_FIFO-1)-1:0] tail;
+        logic [2:0]                      tail_word_offset;
         logic full;
         logic full_next;
     } r_queue;
@@ -103,13 +104,8 @@ module mem_serial_tb;
     logic n_escape;
 
     task transfer_cmd();
-        $display("%h %h %h %h %h", r_queue.full, !dat.write, r_queue.head, r_queue.tail, dat.packets_left);
         while (((r_queue.full && !dat.write) && (r_queue.head == r_queue.tail)) || (|dat.packets_left) || n_escape) begin
             @(negedge clk);
-            $display("%h %h %h %h %h", r_queue.full, !dat.write, r_queue.head, r_queue.tail, dat.packets_left);
-            /*$display("%h %h %h %h %h %h %h %h %h %h %h", dut.state, dut.mem_controller.state, dut.mem_controller.head, dut.mem_controller.tail,
-                dut.mem_controller.avl_ready_0, CMD_IN_VALID, CMD_CONSUMED, READ_OUT, read_out_valid_local, read_consumed, r_queue.tail);
-            */
             n_escape = $urandom_range(1,0);
             // fill the cmd queue
             if (cmd_in_valid_prev)
@@ -140,21 +136,30 @@ module mem_serial_tb;
             end
             cmd_consumed_valid_local = CMD_CONSUMED;
             // empty the read data
-            if (|$urandom_range(1,0) && (read_out_valid_local[r_queue.tail]^read_consumed[r_queue.tail])) begin
-                $display("meow");
-                for (int i = 0; i < 8; i++) begin
-                    if (READ_OUT[r_queue.tail*8+i] != r_queue.expected[r_queue.tail*8+i])
-                        $fatal(2, "Read data does not match expected address: %h data: %h expected: %h\n",
-                         r_queue.addresses[r_queue.tail], READ_OUT[r_queue.tail*8+i], 
-                         r_queue.expected[r_queue.tail*8+i]);
-                    if (i == 7) begin
-                        read_consumed[r_queue.tail] = !read_consumed[r_queue.tail];
-                        r_queue.tail = 1 + r_queue.tail;
-                        r_queue.full = 0;
-                        r_queue.full_next = 0;
-                    end
-                    if (r_queue.tail == LINES_FIFO)
-                        r_queue.tail = 0;
+            if (|$urandom_range(1,0) && (read_out_valid_local[(r_queue.tail*8+r_queue.tail_word_offset)]^
+             read_consumed[(r_queue.tail*8+r_queue.tail_word_offset)])) begin
+                while (r_queue.tail_word_offset < 8) begin
+                    if ((read_out_valid_local[(r_queue.tail*8+r_queue.tail_word_offset)]^
+                            read_consumed[(r_queue.tail*8+r_queue.tail_word_offset)])) begin
+                        if (READ_OUT[r_queue.tail*8+r_queue.tail_word_offset] != r_queue.expected[r_queue.tail*8+r_queue.tail_word_offset]) begin
+                            $warning("Surrounding data: %h %h", r_queue.expected[r_queue.tail*8+r_queue.tail_word_offset+1], 
+                             r_queue.expected[r_queue.tail*8+r_queue.tail_word_offset-1]);
+                            $fatal(2, "Read data does not match expected address: %h data: %h expected: %h\n",
+                             r_queue.addresses[r_queue.tail]+r_queue.tail_word_offset, READ_OUT[r_queue.tail*8+r_queue.tail_word_offset], 
+                             r_queue.expected[r_queue.tail*8+r_queue.tail_word_offset]);
+                        end
+                        read_consumed[r_queue.tail*8+r_queue.tail_word_offset] = !read_consumed[r_queue.tail*8+r_queue.tail_word_offset];
+                        if (r_queue.tail_word_offset == 7) begin
+                            r_queue.tail_word_offset = 0;
+                            r_queue.tail = 1 + r_queue.tail;
+                            r_queue.full = 0;
+                            r_queue.full_next = 0;
+                        end else
+                            r_queue.tail_word_offset = r_queue.tail_word_offset + 1;
+                        if (r_queue.tail == LINES_FIFO)
+                            r_queue.tail = 0;
+                    end else
+                        break;
                 end
             end
              
@@ -164,24 +169,28 @@ module mem_serial_tb;
 
     initial begin
         automatic int unsigned addr_modulo = 2;
-        
+        automatic int unsigned non_zero_words = 0;
+
         n_escape = 1;
         CMD_IN_VALID = '0;
+        
         r_queue.head = 0;
         r_queue.tail = 0;
         r_queue.full = 0;
+        r_queue.full_next = 0;
+        r_queue.tail_word_offset = 0;
+
         cmd_consumed_valid_local = 0;
         cmd_ptr = 0;
         cmd_in_valid_prev = 0;
+        
         read_consumed = 0;
-        r_queue.full_next = 0;
-
+        
         gpu_reset();
         // this essentially restricts our address space to find overwrite related bugs,
         // then it widens it to find bugs that may only occur in higher bounds
         while (2**addr_modulo <= TOTAL_WORDS) begin
             for (int a = 0; a < ITERATIONS; a++) begin
-                $display("%h %h %h", r_queue.full_next, r_queue.head, r_queue.tail);
                 gen_cmd(2**addr_modulo);
                 if (dat.write || !r_queue.full) begin
                     commit_cmd();
@@ -192,6 +201,24 @@ module mem_serial_tb;
             end
             addr_modulo = addr_modulo + 1;
         end
+        
+        while (r_queue.head != r_queue.tail || dut.mem_controller.head != dut.mem_controller.tail) begin
+            n_escape = 1;
+            transfer_cmd();
+        end
+        
+        for (int i = 0; i < TOTAL_WORDS; i++) begin
+            if (mem_goal[i] != 0)
+                non_zero_words = non_zero_words + 1;
+            
+            assert(mem_goal[i] == dut.mem_controller.mem[i])
+            else $fatal(2, "Memory missmatch, address: %h expected: %h got: %h",
+                    i, mem_goal[i], dut.mem_controller.mem[i]);
+        end
+
+        assert (non_zero_words != 0)
+        else $fatal(2, "Something is extremely wrong, no writes have been commited to local or real memory");
+        
         
         $exit();
     end

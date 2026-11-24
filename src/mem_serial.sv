@@ -102,7 +102,7 @@ localparam int writing = 5;
 
 logic [$clog2(5)-1:0] state;
 
-logic [$clog2(6)-1:0] wleft; // writes left
+logic [4:0] wleft; // writes left
 
 logic [MEMCMD_IN_W-1:0] cmd_in_valid_local;
 
@@ -142,8 +142,7 @@ always @(posedge afi_half_clk or negedge CPU_RESET_n) begin
             rbuff_valid_prev <= 1;
             READ_OUT[rbuff_ptr] <= avl.rdata;
             rbuff_ptr <= rbuff_ptr + 1;
-            // minus 2 due to previous cycle along with zero index
-            if (rbuff_ptr == WORDS_FIFO-2) // support non-powers of 2
+            if (rbuff_ptr == WORDS_FIFO-1) // support non-powers of 2
                 rbuff_ptr <= 0;
         end
         case (state)
@@ -182,6 +181,7 @@ always @(posedge afi_half_clk or negedge CPU_RESET_n) begin
             end
             read_start : begin
                 if (avl.ready) begin
+                    avl.write_req <= 0;
                     if (cmd_in_valid_local[in_ptr]^CMD_CONSUMED[in_ptr]) begin
                         CMD_CONSUMED[in_ptr] <= !CMD_CONSUMED[in_ptr];
                         avl.addr <= CMD_IN[in_ptr];
@@ -199,12 +199,13 @@ always @(posedge afi_half_clk or negedge CPU_RESET_n) begin
             end
             write_issue : begin
                 if (avl.ready) begin
+                    avl.read_req <= 0;
                     if (cmd_in_valid_local[in_ptr]^CMD_CONSUMED[in_ptr]) begin
                         CMD_CONSUMED[in_ptr] <= !CMD_CONSUMED[in_ptr];
                         avl.wdata <= CMD_IN[in_ptr];
                         avl.burstbegin <= 1;
                         avl.write_req <= 1;
-                        wleft <= 6; // leaves early
+                        wleft <= 7; // leaves early
 
                         state <= writing;
                         in_ptr <= in_ptr + 1;
@@ -225,11 +226,10 @@ always @(posedge afi_half_clk or negedge CPU_RESET_n) begin
                         in_ptr <= in_ptr + 1;
 
                         wleft <= wleft - 1;
-                        if (|wleft)
-                            avl.write_req <= 1;
-                        else begin
+                        if (wleft-1 == 0)
                             state <= idle;
-                        end
+                        
+                        avl.write_req <= 1;
                     end else begin
                         avl.write_req <= 0;
                     end

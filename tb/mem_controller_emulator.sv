@@ -85,6 +85,7 @@ assert property (
     disable iff (!local_init_done || !global_reset_n)
     avl_burstbegin_0 |-> (!consuming_write)
 ) else begin
+    $display("Writes left: %h", write_left);
     $fatal(2, "A new burst was started without finishing the write.\n");
 end
 
@@ -115,7 +116,7 @@ always @(posedge afi_half_clk or negedge global_reset_n) begin
             if (escape_stall) begin
                 local_init_done <= 1;
                 local_cal_success <= 1;
-                avl_ready_0 <= 1;
+                avl_ready_0 <= 0;
                 for (int i = 0; i < TOTAL_WORDS; i++)
                     mem[i] <= '0;
                 avl_rdata_valid_0 <= 0;
@@ -129,7 +130,7 @@ always @(posedge afi_half_clk or negedge global_reset_n) begin
         end else begin
             // empty the queue // technically the real thing drains faster
             avl_rdata_valid_0 <= 0;
-            if (inc_queue && (queue_full || head != tail)) begin
+            if (inc_queue && (head != tail || state == 7)) begin
                 case (state)
                     0 : begin
                         tail <= tail + 1;
@@ -140,32 +141,28 @@ always @(posedge afi_half_clk or negedge global_reset_n) begin
                     end
                     1 : begin
                         tail <= tail + 1;
-                        bursts <= queue[tail];
+                        bursts <= queue[tail][4:0];
                         state <= 2;
                     end
                     2 : begin
                         tail <= tail + 1;
-                        cur_addr <= queue[tail];
+                        cur_addr <= queue[tail][26:0];
                         state <= 3;
                     end
                     3 : begin
                         tail <= tail + 1;
-                        bmask <= queue[tail];
+                        bmask <= queue[tail][3:0];
                         state <= 4;
                     end
                     4 : begin
                         tail <= tail + 1;
-                        $display("%h %h %h %h", bmask, cur_addr, {bmask[3] ? queue[tail][31:24] : mem[cur_addr][31:24],
-                                          bmask[2] ? queue[tail][23:16] : mem[cur_addr][23:16],
-                                          bmask[1] ? queue[tail][15 :8] : mem[cur_addr][15:8],
-                                          bmask[0] ? queue[tail][7  :0] : mem[cur_addr][7 :0]}, queue[tail]);
                         mem[cur_addr] <= {bmask[3] ? queue[tail][31:24] : mem[cur_addr][31:24],
                                           bmask[2] ? queue[tail][23:16] : mem[cur_addr][23:16],
                                           bmask[1] ? queue[tail][15 :8] : mem[cur_addr][15:8],
                                           bmask[0] ? queue[tail][7  :0] : mem[cur_addr][7 :0]};
                         bursts <= bursts - 1;
                         cur_addr <= cur_addr + 1;
-                        if (bursts-2 == 0)
+                        if (bursts-1 == 0)
                             state <= 0;
                         else
                             state <= 3;
@@ -185,7 +182,7 @@ always @(posedge afi_half_clk or negedge global_reset_n) begin
                         avl_rdata_0 <= mem[cur_addr];
                         bursts <= bursts - 1;
                         cur_addr <= cur_addr + 1;
-                        if (bursts-2 == 0)
+                        if (bursts-1 == 0)
                             state <= 0;
                     end
                 endcase
@@ -197,26 +194,26 @@ always @(posedge afi_half_clk or negedge global_reset_n) begin
                 end
             end else if (avl_ready_0 && (avl_burstbegin_0 || (consuming_write && avl_write_req_0))) begin
                 if (avl_write_req_0 && consuming_write) begin
-                    queue[head] <= avl_be_0;
-                    queue[QUEUE_WRAPPER & (head+1)] <= avl_wdata_0;
+                    queue[head][3:0] <= avl_be_0;
+                    queue[(QUEUE_SIZE-1) & (head+1)] <= avl_wdata_0;
                     write_left <= write_left - 1;
                     head <= head + 2;
-                    if (write_left-2 == 0) 
+                    if (write_left-1 == 0) 
                         consuming_write <= 0;
-                end else if (avl_write_req_0) begin
+                end else if (avl_write_req_0 && avl_burstbegin_0) begin
                     queue[head] <= '1; // write type
-                    queue[QUEUE_WRAPPER & (head+1)] <= avl_size_0;
-                    queue[QUEUE_WRAPPER & (head+2)] <= avl_addr_0;
-                    queue[QUEUE_WRAPPER & (head+3)] <= avl_be_0;
-                    queue[QUEUE_WRAPPER & (head+4)] <= avl_wdata_0;
+                    queue[(QUEUE_SIZE-1) & (head+1)][4:0] <= avl_size_0;
+                    queue[(QUEUE_SIZE-1) & (head+2)][26:0] <= avl_addr_0;
+                    queue[(QUEUE_SIZE-1) & (head+3)][3:0] <= avl_be_0;
+                    queue[(QUEUE_SIZE-1) & (head+4)] <= avl_wdata_0;
                     head <= head + 5;
-                    write_left <= avl_size_0;
+                    write_left <= avl_size_0-1;
                     if (avl_size_0 > 1)
                         consuming_write <= 1;
-                end else if (avl_read_req_0) begin
+                end else if (avl_read_req_0 && avl_burstbegin_0) begin
                     queue[head] <= '0; // read type
-                    queue[QUEUE_WRAPPER & (head+1)] <= avl_size_0;
-                    queue[QUEUE_WRAPPER & (head+2)] <= avl_addr_0;
+                    queue[(QUEUE_SIZE-1) & (head+1)][4:0] <= avl_size_0;
+                    queue[(QUEUE_SIZE-1) & (head+2)][26:0] <= avl_addr_0;
                     head <= head + 3;
                 end
                 if (queue_full)
