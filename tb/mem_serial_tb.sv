@@ -1,230 +1,25 @@
 `include "../src/params.svh"
-// dummy but does emulate memory access and has important assertions
-module mem_controller (
-        input  logic        global_reset_n,
-		input  logic        avl_burstbegin_0,
-		input  logic [26:0] avl_addr_0,
-		input  logic [31:0] avl_wdata_0,
-		input  logic [3:0]  avl_be_0,
-		input  logic        avl_read_req_0,
-		input  logic        avl_write_req_0,
-		input  logic [4:0]  avl_size_0,
-        output logic        local_init_done,                         
-		output logic        local_cal_success,
-		output logic        local_cal_fail,
-        output logic        afi_half_clk,
-		output logic        avl_ready_0,                              
-		output logic        avl_rdata_valid_0,
-		output logic [31:0] avl_rdata_0,
-        // everything following is dead; simply here to prevent warnings
-        input  wire         pll_ref_clk,       
-		input  wire         soft_reset_n,                 
-		output wire         afi_clk,           
-		output wire         afi_reset_n,               
-		output wire         afi_reset_export_n,
-		output wire [9:0]   mem_ca,                                 
-		output wire [0:0]   mem_ck,
-		output wire [0:0]   mem_ck_n,
-		output wire [0:0]   mem_cke,
-		output wire [0:0]   mem_cs_n,
-		output wire [3:0]   mem_dm,
-		inout  wire [31:0]  mem_dq,
-		inout  wire [3:0]   mem_dqs,
-		inout  wire [3:0]   mem_dqs_n,
-		input  wire         mp_cmd_clk_0_clk,                  
-		input  wire         mp_cmd_reset_n_0_reset_n,      
-		input  wire         mp_rfifo_clk_0_clk,              
-		input  wire         mp_rfifo_reset_n_0_reset_n,  
-		input  wire         mp_wfifo_clk_0_clk,              
-		input  wire         mp_wfifo_reset_n_0_reset_n,  
-		input  wire         oct_rzqin
-);
 
-localparam int QUEUE_SIZE = 256; 
-localparam int QUEUE_WRAPPER = $clog2(QUEUE_SIZE-1);
-
-logic control_clk = 0;
-always #3 control_clk = ~control_clk;
-assign afi_half_clk = control_clk;
-
-// memory block; 4Gb (512MB); word aligned
-logic [134217728:0] [31:0] mem;
-
-// lazy implementation since this is only ever emulated
-logic queue_full;
-logic [QUEUE_WRAPPER-1:0] head;
-logic [QUEUE_WRAPPER-1:0] tail;
-logic [QUEUE_SIZE-1:0] [31:0] queue;
-
-logic [4:0] write_left;
-logic consuming_write;
-
-logic escape_stall = ($urandom_range(2, 1) == 1) || FAST_EMULATION;
-logic inc_queue = ($urandom_range(2, 1) == 1) || FAST_EMULATION;
-
-assign queue_full = (head-tail <= 10) && head!=tail;
-
-assert property (
-    @(posedge afi_half_clk)
-    disable iff (!local_init_done || !global_reset_n)
-    avl_burstbegin_0 |-> (avl_write_req_0 || avl_read_req_0)
-) else begin
-    $fatal(2, "A burst was requested without a read or write, this can cause undefined behavior.\n");
-end
-
-assert property (
-    @(posedge afi_half_clk)
-    disable iff (!local_init_done || !global_reset_n)
-    avl_read_req_0 |-> (avl_burstbegin_0)
-) else begin
-    $fatal(2, "A read was requested without a burst, this should not happen but is harmless.\n");
-end
-
-assert property (
-    @(posedge afi_half_clk)
-    disable iff (!local_init_done || !global_reset_n)
-    avl_burstbegin_0 |-> (!consuming_write)
-) else begin
-    $fatal(2, "A new burst was started without finishing the write.\n");
-end
-
-assert property (
-    @(posedge afi_half_clk)
-    disable iff (!local_init_done || !global_reset_n)
-    avl_write_req_0 |-> (avl_burstbegin_0 || consuming_write)
-) else begin
-    $fatal(2, "A write was asserted without reason.\n");
-end
-
-logic [26:0] cur_addr;
-logic [3:0]  bmask; 
-logic [3:0]  state;
-logic [4:0]  bursts;
-
-always @(posedge control_clk) begin
-    if (!global_reset_n) begin
-        local_init_done <= 0;
-        local_cal_success <= 0;
-        local_cal_fail <= 0;
-    end else begin
-        if (!local_init_done) begin 
-            if (escape_stall) begin
-                local_init_done <= 1;
-                local_cal_success <= 1;
-                avl_ready_0 <= 1;
-                mem <= '0;
-                avl_rdata_valid_0 <= 0;
-                avl_rdata_0 <= 0;
-                consuming_write <= 0;
-                write_left <= 0;
-                state <= 0;
-            end
-        end else begin
-            // empty the queue // technically the real thing drains faster
-            avl_rdata_valid_0 <= 0;
-            if (inc_queue && (head != tail)) begin
-                case (state)
-                    0 : begin
-                        if (queue[tail])
-                            state <= 1; // write
-                        else
-                            state <= 5; // read
-                    end
-                    1 : begin
-                        bursts <= queue[tail];
-                        state <= 2;
-                    end
-                    2 : begin
-                        cur_addr <= queue[tail];
-                        state <= 3;
-                    end
-                    3 : begin
-                        bmask <= queue[tail];
-                        state <= 4;
-                    end
-                    4 : begin
-                        mem[cur_addr] <= {mem[cur_addr][31:24] & {4{bmask[3]}},
-                                          mem[cur_addr][23:16] & {4{bmask[2]}},
-                                          mem[cur_addr][15:8]  & {4{bmask[1]}},
-                                          mem[cur_addr][7:0]   & {4{bmask[0]}}};
-                        bursts <= bursts - 1;
-                        cur_addr <= cur_addr + 1;
-                        if (bursts-1 == 0)
-                            state <= 0;
-                        else
-                            state <= 3;
-                    end
-                    5 : begin
-                        bursts <= queue[tail];
-                        state <= 6;
-                    end
-                    6 : begin
-                        cur_addr <= queue[tail];
-                        state <= 7;
-                    end
-                    7 : begin
-                        avl_rdata_valid_0 <= 1;
-                        avl_rdata_0 <= mem[cur_addr];
-                        bursts <= bursts - 1;
-                        cur_addr <= cur_addr + 1;
-                        if (bursts-1 == 0)
-                            state <= 0;
-                    end
-                endcase
-                tail <= tail + 1;
-            end
-            // consume incoming requests (delay at random)
-            if (!avl_ready_0 && !queue_full) begin
-                if (escape_stall) begin
-                    avl_ready_0 <= 1;
-                end
-            end else if (avl_ready_0 && (avl_burstbegin_0 || (consuming_write && avl_write_req_0))) begin
-                if (avl_write_req_0 && consuming_write) begin
-                    queue[head] <= avl_wdata_0;
-                    write_left <= write_left - 1;
-                    head <= head + 1;
-                    if (write_left-1 == 0) 
-                        consuming_write <= 0;
-                end else if (avl_write_req_0) begin
-                    queue[head] <= '1; // write type
-                    queue[QUEUE_WRAPPER & (head+1)] <= avl_size_0;
-                    queue[QUEUE_WRAPPER & (head+2)] <= avl_addr_0;
-                    queue[QUEUE_WRAPPER & (head+3)] <= avl_be_0;
-                    queue[QUEUE_WRAPPER & (head+4)] <= avl_wdata_0;
-                    head <= head + 5;
-                    write_left <= avl_size_0-1;
-                    if (avl_size_0 > 1)
-                        consuming_write <= 1;
-                end else if (avl_read_req_0) begin
-                    queue[head] <= '0; // read type
-                    queue[QUEUE_WRAPPER & (head+1)] <= avl_size_0;
-                    queue[QUEUE_WRAPPER & (head+2)] <= avl_addr_0;
-                    head <= head + 3;
-                end
-                if (queue_full)
-                    avl_ready_0 <= 0;
-                else if (escape_stall)
-                    avl_ready_0 <= 1;
-            end
-        end
-    end
-end
-
-endmodule
+// This is a randomized testbench meant to see if the memory serializer
+// reads and writes how we expect under randomized timing. This is meant
+// to stress the clock domain crossing that will occur in addition
+// to testing normal corectness.
 
 module mem_serial_tb;
-    logic clk = 0;
-    logic control_clk = 0;
-    logic reset = 0;
-    always #10 clk = ~clk;
-    
+    localparam int ITERATIONS = 10; // iterations per modulos
+
+    // DUT wires
     logic [MEMCMD_IN_W-1:0] [31:0] CMD_IN;
     logic [MEMCMD_IN_W-1:0]        CMD_IN_VALID;
     logic [MEMCMD_IN_W-1:0]        CMD_CONSUMED;
-    logic [7:0] [31:0]             READ_OUT;
-    logic [7:0]                    READ_OUT_VALID; 
+    logic [WORDS_FIFO-1:0] [31:0]  READ_OUT;
+    logic [WORDS_FIFO-1:0]         READ_OUT_VALID;
 
-    logic [134217727:0] [31:0] mem_goal;
+    logic [TOTAL_WORDS-1:0] [31:0] mem_goal; // expected state; checked with reads
+
+    logic clk = 0;
+    logic reset = 0;
+    always #10 clk = ~clk; // different from memory controller
 
     mem_serial dut (
         .CMD_IN(CMD_IN),
@@ -236,32 +31,169 @@ module mem_serial_tb;
         .CPU_RESET_n(reset),
         .CLK(clk)
     );
-
-    localparam int ITERATIONS = 1000;
     
     struct {
-        logic                write;
-        logic [26:0]         addr;
-        logic [7:0] [31:0]   wdata;
-        logic [31:0]         be;
-        logic [4:0]          burstcount;
+        logic [$clog2(11)-1:0]            packets_left;
+        logic                             write;
+        logic [$clog2(TOTAL_WORDS-1)-1:0] addr;
+        logic [7:0] [31:0]                wdata;
+        // for future use, currently excluded because 
+        // we do read modify cache evict write and 
+        // cache lines have a constant size (32 bytes for us)
+        logic [4:0]            burstcount;
+        logic [31:0]           byteenable;
     } dat;
 
-    initial begin
-        automatic int addr_modulo = 2;
-        while (addr_modulo <= 134217727) begin
-            for (int i = 0; i < ITERATIONS; i++) begin
-                dat.write = $urandom_range(1,0);
-                dat.addr  = $urandom_range(addr_modulo-1, 0);
-                for (int a = 0; a < 8; a++) begin
-                    dat.wdata[a] = $urandom();
-                end
-                dat.be    = $urandom();
-                dat.burstcount = $urandom_range(8, 1);
-                if (dat.write)
-            end
-            addr_modulo = addr_modulo ** 2;
+    task gpu_reset();
+        @(posedge clk);
+        reset = 0;
+        for (int a = 0; a < ITERATIONS; a++) begin // extra long so both clock domains reset
+            @(posedge clk);
         end
+        reset = 1;
+        for (int a = 0; a < ITERATIONS; a++) begin
+            @(posedge clk);
+        end    
+    endtask
+    
+    task gen_cmd(int unsigned addr_modulo);
+        dat.write = |$urandom_range(1,0);
+        dat.addr  = $urandom_range(addr_modulo-1, 0);
+        for (int i = 0; i < 8; i++) begin
+            dat.wdata[i] = $urandom();
+        end
+        dat.packets_left = 2 + 8*dat.write;
+        // currently unused
+        dat.burstcount = 8; // $urandom_range(8,1);
+        dat.byteenable[31:0] = $urandom(); 
+    endtask
+        
+    struct {
+        logic [LINES_FIFO-1:0] [31:0] addresses;
+        logic [WORDS_FIFO-1:0] [31:0] expected;
+
+        logic [$clog2(LINES_FIFO-1)-1:0] head;
+        logic [$clog2(LINES_FIFO-1)-1:0] tail;
+        logic full;
+        logic full_next;
+    } r_queue;
+
+    task commit_cmd(); // commit to local state
+        if (dat.write) begin
+            for (int i = 0; i < dat.burstcount; i++) begin
+                mem_goal[dat.addr+i] = dat.wdata[i];
+            end
+        end else begin
+            r_queue.addresses[r_queue.head] = dat.addr;
+            for (int i = 0; i < dat.burstcount; i++) begin
+                r_queue.expected[r_queue.head*8+i] = mem_goal[dat.addr+i];
+            end
+            r_queue.head = r_queue.head + 1; 
+            if (r_queue.head == r_queue.tail)
+                r_queue.full_next = 1;
+        end
+    endtask
+
+    logic [MEMCMD_IN_W-1:0] cmd_consumed_valid_local;
+    logic [WORDS_FIFO-1:0]  read_out_valid_local;
+    logic [WORDS_FIFO-1:0]  read_consumed;
+    logic cmd_in_valid_prev;
+    logic [$clog2(MEMCMD_IN_W-1)-1:0] cmd_ptr;
+    logic [$clog2(MEMCMD_IN_W-1)-1:0] cmd_ptr_prev;
+    logic n_escape;
+
+    task transfer_cmd();
+        $display("%h %h %h %h %h", r_queue.full, !dat.write, r_queue.head, r_queue.tail, dat.packets_left);
+        while (((r_queue.full && !dat.write) && (r_queue.head == r_queue.tail)) || (|dat.packets_left) || n_escape) begin
+            @(negedge clk);
+            $display("%h %h %h %h %h", r_queue.full, !dat.write, r_queue.head, r_queue.tail, dat.packets_left);
+            /*$display("%h %h %h %h %h %h %h %h %h %h %h", dut.state, dut.mem_controller.state, dut.mem_controller.head, dut.mem_controller.tail,
+                dut.mem_controller.avl_ready_0, CMD_IN_VALID, CMD_CONSUMED, READ_OUT, read_out_valid_local, read_consumed, r_queue.tail);
+            */
+            n_escape = $urandom_range(1,0);
+            // fill the cmd queue
+            if (cmd_in_valid_prev)
+                CMD_IN_VALID[cmd_ptr_prev] = !CMD_IN_VALID[cmd_ptr_prev];
+            cmd_in_valid_prev = 0;
+            cmd_ptr_prev = cmd_ptr;
+            if (|$urandom_range(1,0) && !(cmd_consumed_valid_local[cmd_ptr] ^
+                    CMD_IN_VALID[cmd_ptr]) && |dat.packets_left) begin
+
+                cmd_in_valid_prev = 1;
+                if (dat.packets_left <= dat.burstcount && |dat.write)
+                    CMD_IN[cmd_ptr] = dat.wdata[dat.burstcount-dat.packets_left];
+                else if (dat.packets_left == dat.burstcount+1 && |dat.write)
+                    CMD_IN[cmd_ptr] = dat.addr;
+                else if (dat.packets_left == dat.burstcount+2 && |dat.write)
+                    CMD_IN[cmd_ptr] = '1;
+                else if (dat.packets_left == 2)
+                    CMD_IN[cmd_ptr] = '0;
+                else if (dat.packets_left == 1)
+                    CMD_IN[cmd_ptr] = dat.addr;
+                else
+                    $fatal(2, "Invalid command state reached.\n");
+                if (cmd_ptr == MEMCMD_IN_W-1)
+                    cmd_ptr = 0;
+                else
+                    cmd_ptr = cmd_ptr + 1;
+                dat.packets_left = dat.packets_left - 1;
+            end
+            cmd_consumed_valid_local = CMD_CONSUMED;
+            // empty the read data
+            if (|$urandom_range(1,0) && (read_out_valid_local[r_queue.tail]^read_consumed[r_queue.tail])) begin
+                $display("meow");
+                for (int i = 0; i < 8; i++) begin
+                    if (READ_OUT[r_queue.tail*8+i] != r_queue.expected[r_queue.tail*8+i])
+                        $fatal(2, "Read data does not match expected address: %h data: %h expected: %h\n",
+                         r_queue.addresses[r_queue.tail], READ_OUT[r_queue.tail*8+i], 
+                         r_queue.expected[r_queue.tail*8+i]);
+                    if (i == 7) begin
+                        read_consumed[r_queue.tail] = !read_consumed[r_queue.tail];
+                        r_queue.tail = 1 + r_queue.tail;
+                        r_queue.full = 0;
+                        r_queue.full_next = 0;
+                    end
+                    if (r_queue.tail == LINES_FIFO)
+                        r_queue.tail = 0;
+                end
+            end
+             
+            read_out_valid_local = READ_OUT_VALID;
+        end
+    endtask
+
+    initial begin
+        automatic int unsigned addr_modulo = 2;
+        
+        n_escape = 1;
+        CMD_IN_VALID = '0;
+        r_queue.head = 0;
+        r_queue.tail = 0;
+        r_queue.full = 0;
+        cmd_consumed_valid_local = 0;
+        cmd_ptr = 0;
+        cmd_in_valid_prev = 0;
+        read_consumed = 0;
+        r_queue.full_next = 0;
+
+        gpu_reset();
+        // this essentially restricts our address space to find overwrite related bugs,
+        // then it widens it to find bugs that may only occur in higher bounds
+        while (2**addr_modulo <= TOTAL_WORDS) begin
+            for (int a = 0; a < ITERATIONS; a++) begin
+                $display("%h %h %h", r_queue.full_next, r_queue.head, r_queue.tail);
+                gen_cmd(2**addr_modulo);
+                if (dat.write || !r_queue.full) begin
+                    commit_cmd();
+                end else
+                    dat.packets_left = 0;
+                transfer_cmd();
+                r_queue.full = r_queue.full_next;
+            end
+            addr_modulo = addr_modulo + 1;
+        end
+        
+        $exit();
     end
 
 endmodule

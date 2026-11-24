@@ -1,5 +1,5 @@
 `include "types.svh"
-module mem_sched (
+module mem_serial (
     output    [9:0]             DDR2LP_CA,
     output    [1:0]             DDR2LP_CKE,
     output                      DDR2LP_CK_n,
@@ -14,8 +14,8 @@ module mem_sched (
     input  [MEMCMD_IN_W-1:0] [31:0] CMD_IN,
     input  [MEMCMD_IN_W-1:0]        CMD_IN_VALID,
     output logic [MEMCMD_IN_W-1:0]  CMD_CONSUMED,
-    output logic [7:0] [31:0]   READ_OUT,
-    output logic [7:0]          READ_OUT_VALID, // alternates to indicate new data
+    output logic [WORDS_FIFO-1:0] [31:0]   READ_OUT,
+    output logic [WORDS_FIFO-1:0]          READ_OUT_VALID, // alternates to indicate new data
 
     input                       CPU_RESET_n,
     input                       CLK,
@@ -72,7 +72,7 @@ mem_controller mem_controller (
     .avl_be_0(avl.be),
     .avl_read_req_0(avl.read_req),
     .avl_write_req_0(avl.write_req),
-    .avl_size_0(avl.burstcount),
+    .avl_size_0(8),//avl.burstcount),
 
     .afi_clk(),
     .afi_half_clk(afi_half_clk),
@@ -106,10 +106,12 @@ logic [$clog2(6)-1:0] wleft; // writes left
 
 logic [MEMCMD_IN_W-1:0] cmd_in_valid_local;
 
-logic [$clog2(MEMCMD_IN_W-1)-1:0] in_ptr; // zero indexed
-logic [2:0] rbuff_ptr;
+logic [$clog2(MEMCMD_IN_W-1)-1:0] in_ptr;    // zero indexed
+logic [$clog2(WORDS_FIFO-1)-1:0]  rbuff_ptr; 
+logic [$clog2(WORDS_FIFO-1)-1:0]  rbuff_ptr_prev; 
+logic rbuff_valid_prev;
 
-always @(posedge afi_half_clk) begin
+always @(posedge afi_half_clk or negedge CPU_RESET_n) begin
     if (!CPU_RESET_n) begin
         state <= initializing;
         avl.addr <= '0; // 26:0
@@ -120,18 +122,29 @@ always @(posedge afi_half_clk) begin
         avl.burstcount <= 8; 
 
         rbuff_ptr <= 0;
+        rbuff_ptr_prev <= 0;
         in_ptr <= 0;
+        rbuff_valid_prev <= 0;
 
         cmd_in_valid_local <= '0;
 
         READ_OUT_VALID <= '0;
         CMD_CONSUMED <= '0;
     end else begin
-        cmd_in_valid_local <= CMD_IN_VALID;
+        // prevent metastability & mid write sampling
+        cmd_in_valid_local <= CMD_IN_VALID; 
+        if (rbuff_valid_prev && local_init_done && local_cal_success)
+            READ_OUT_VALID[rbuff_ptr_prev] <= !READ_OUT_VALID[rbuff_ptr_prev];
+        rbuff_ptr_prev <= rbuff_ptr;
+        rbuff_valid_prev <= 0;
+
         if (avl.rdata_valid && local_init_done && local_cal_success) begin
+            rbuff_valid_prev <= 1;
             READ_OUT[rbuff_ptr] <= avl.rdata;
-            READ_OUT_VALID[rbuff_ptr] <= !READ_OUT_VALID[rbuff_ptr];
             rbuff_ptr <= rbuff_ptr + 1;
+            // minus 2 due to previous cycle along with zero index
+            if (rbuff_ptr == WORDS_FIFO-2) // support non-powers of 2
+                rbuff_ptr <= 0;
         end
         case (state)
             initializing : begin
@@ -209,9 +222,10 @@ always @(posedge afi_half_clk) begin
                         CMD_CONSUMED[in_ptr] <= !CMD_CONSUMED[in_ptr];
                         avl.wdata <= CMD_IN[in_ptr];
                         avl.write_req <= 1;
+                        in_ptr <= in_ptr + 1;
 
                         wleft <= wleft - 1;
-                        if (wleft)
+                        if (|wleft)
                             avl.write_req <= 1;
                         else begin
                             state <= idle;
