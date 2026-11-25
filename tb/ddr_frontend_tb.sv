@@ -1,11 +1,11 @@
 `include "../src/params.svh"
 
-// This is a randomized testbench meant to see if the memory serializer
+// This is a randomized testbench meant to see if the ddr helper
 // reads and writes how we expect under randomized timing. This is meant
 // to stress the clock domain crossing that will occur in addition
 // to testing normal corectness.
 
-module mem_serial_tb;
+module ddr_frontend_tb;
     localparam int ITERATIONS = 100; // iterations per modulos
 
     // DUT wires
@@ -21,7 +21,7 @@ module mem_serial_tb;
     logic reset = 0;
     always #10 clk = ~clk; // different from memory controller
 
-    mem_serial dut (
+    ddr_frontend dut (
         .CMD_IN(CMD_IN),
         .CMD_IN_VALID(CMD_IN_VALID),
         .CMD_CONSUMED(CMD_CONSUMED),
@@ -56,6 +56,7 @@ module mem_serial_tb;
         end    
     endtask
     
+    // fills the struct with random (valid) data
     task gen_cmd(int unsigned addr_modulo);
         dat.write = |$urandom_range(1,0);
         dat.addr  = $urandom_range(addr_modulo-1, 0);
@@ -135,7 +136,7 @@ module mem_serial_tb;
                 dat.packets_left = dat.packets_left - 1;
             end
             cmd_consumed_valid_local = CMD_CONSUMED;
-            // empty the read data
+            // empty & check the read data
             if (|$urandom_range(1,0) && (read_out_valid_local[(r_queue.tail*8+r_queue.tail_word_offset)]^
              read_consumed[(r_queue.tail*8+r_queue.tail_word_offset)])) begin
                 while (r_queue.tail_word_offset < 8) begin
@@ -207,6 +208,7 @@ module mem_serial_tb;
             transfer_cmd();
         end
         
+        // checks if the memory state is what we expect
         for (int i = 0; i < TOTAL_WORDS; i++) begin
             if (mem_goal[i] != 0)
                 non_zero_words = non_zero_words + 1;

@@ -1,8 +1,8 @@
-all: mem_serial_tb
+all: ddr_frontend_tb
 
-mem_serial_tb: src/mem_serial.sv src/types.svh src/params.svh tb/mem_controller_emulator.sv tb/mem_serial_tb.sv
-	verilator -Wno-fatal --trace --binary --sv -Isrc src/mem_serial.sv src/types.svh src/params.svh tb/mem_controller_emulator.sv tb/mem_serial_tb.sv --top-module mem_serial_tb --Mdir build
-	build/Vmem_serial_tb
+ddr_frontend_tb: src/ddr_frontend.sv src/types.svh src/params.svh tb/mem_controller_emulator.sv tb/ddr_frontend_tb.sv
+	verilator -Wno-fatal --trace --binary --sv -Isrc src/ddr_frontend.sv src/types.svh src/params.svh tb/mem_controller_emulator.sv tb/ddr_frontend_tb.sv --top-module ddr_frontend_tb --Mdir build
+	build/Vddr_frontend_tb
 
 clean:
 	rm -rf build

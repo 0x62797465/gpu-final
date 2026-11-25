@@ -1,10 +1,10 @@
-- Complete DDR helper
-- Complete UART helper
+- ~~Complete DDR helper~~
+- ~~Complete UART helper~~
+- Cache decleration & logic
 - Outline all unit declerations and wiring
 - Complete init system
 - LD/ST units & memory system
 - Schedular logic (big)
-- Cache decleration & logic
 - INT32
 - FP32
 - SFU

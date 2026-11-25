@@ -1,5 +1,19 @@
 `include "types.svh"
-module mem_serial (
+
+// This module sends requests to the real
+// memory controller. It is required due
+// to the clock needed. It handles clock
+// domain crossing with a safe "valid"
+// bit determined by xoring a local state
+// and recieved state (in addition to
+// giving the external data a cycle to 
+// settle). The reads are outputted 
+// asyncronessly, with the valid bit 
+// being set a cycle after the data is 
+// written to prevent reading the data
+// before it can settle. 
+
+module ddr_frontend (
     output    [9:0]             DDR2LP_CA,
     output    [1:0]             DDR2LP_CKE,
     output                      DDR2LP_CK_n,
@@ -18,10 +32,7 @@ module mem_serial (
     output logic [WORDS_FIFO-1:0]          READ_OUT_VALID, // alternates to indicate new data
 
     input                       CPU_RESET_n,
-    input                       CLK,
-
-    output    [15:0]            DEBUG_OUT
-
+    input                       CLK
 );
 
 logic local_init_done;
@@ -44,9 +55,6 @@ struct {
 } avl;
 
 assign avl.be = '1;
-
-assign debug_out = {CLK, local_init_done,
-    local_cal_success, local_cal_fail};
 
 mem_controller mem_controller (
     .pll_ref_clk(CLK),
