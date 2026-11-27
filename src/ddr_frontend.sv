@@ -44,7 +44,7 @@ logic afi_half_clk;
 struct {
     logic          ready;       
     logic          burstbegin;  
-    logic [26:0]   addr;        
+    logic [31:0]   addr;    
     logic          rdata_valid; 
     logic [31:0]   rdata;       
     logic [31:0]   wdata;       
@@ -110,7 +110,7 @@ localparam int writing = 5;
 
 logic [$clog2(5)-1:0] state;
 
-logic [4:0] wleft; // writes left
+logic [4:0] wleft; // writes left, max 8
 
 logic [MEMCMD_IN_W-1:0] cmd_in_valid_local;
 
@@ -122,7 +122,7 @@ logic rbuff_valid_prev;
 always @(posedge afi_half_clk or negedge CPU_RESET_n) begin
     if (!CPU_RESET_n) begin
         state <= initializing;
-        avl.addr <= '0; // 26:0
+        avl.addr <= '0; 
         avl.wdata <= '0;
         avl.write_req <= '0;
         avl.burstbegin <= '0;
